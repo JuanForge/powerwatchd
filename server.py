@@ -38,7 +38,7 @@ class UPS:
         except ConnectionRefusedError:
             raise self.backend_ConnectionRefusedError(traceback.format_exc())
     
-    def setTimeLifeCache(self, x: int | float):
+    def setTimeLifeCache(self, x: float):
         with self.lock:
             self.timelifecache = x
     
@@ -115,7 +115,7 @@ def client(metrics: prometheus.session, sock: socket.socket, addr, ups: UPS):
                     return
                 else:
                     continue
-    except Exception as e:
+    except:
         print(traceback.format_exc())
     finally:
         if (type(name) == str) and (type(ID) == str):
@@ -217,7 +217,7 @@ if __name__ == "__main__":
         "--simulate-profile",
         type=str,
         default=False,
-        help=f"Use a predefined simulation profile to inject synthetic UPS states for testing purposes.",
+        help="Use a predefined simulation profile to inject synthetic UPS states for testing purposes.",
         choices=profile_simulate.keys()
     )
     parser.add_argument(

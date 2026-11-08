@@ -1,6 +1,13 @@
 from typing import Union
-from prometheus_client import Gauge, Info
-from prometheus_client import generate_latest, CollectorRegistry, CONTENT_TYPE_LATEST
+
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Gauge,
+    Info,
+    generate_latest,
+)
+
 
 class session:
     def __init__(self) -> None:
