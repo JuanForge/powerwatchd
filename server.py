@@ -1,19 +1,15 @@
-import sys
-import json
-import time
-import socket
-import secrets
 import argparse
+import json
+import secrets
+import socket
+import sys
 import threading
+import time
 import traceback
 
-from src import protocol
-from version import __version__, __schemaVersion__
-from src.ups import backend0
-from src.ups import backend1
-from src.ups import backend2
+from src import prometheus, protocol
+from version import __schemaVersion__, __version__
 
-from src import prometheus
 
 class UPS:
     class backend_ConnectionRefusedError(Exception): pass
@@ -29,10 +25,13 @@ class UPS:
         
         try:
             if backend == 0:
+                from src.ups import backend0
                 self.backend = backend0.session(ups_name=ups_name, host=ups_host, port=ups_port)
             elif backend == 1:
+                from src.ups import backend1
                 self.backend = backend1.session(ups_name=ups_name, host=ups_host, port=ups_port)
             elif backend == 2:
+                from src.ups import backend2
                 self.backend = backend2.session(ups_name=ups_name, host=ups_host, port=ups_port)
             else:
                 raise RuntimeError("Invalid backend number.")
