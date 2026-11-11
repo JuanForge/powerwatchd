@@ -1,7 +1,0 @@
-{
-    "index": "Do not modify this file. Use CLI arguments instead. File-based configuration will be deprecated.",
-    "schemaVersion": "schema:0.0.1",
-    "cacheUPStime": 1,
-    "backend": 2,
-    "UPSname": "ecoEaton"
-}

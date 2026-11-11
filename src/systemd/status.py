@@ -1,7 +1,8 @@
 import traceback
-
 from typing import Literal
+
 from pydbus import SystemBus
+
 
 def status(name: str, bus) -> dict[
                                                     Literal["status", "boot"],
@@ -42,6 +43,6 @@ def status(name: str, bus) -> dict[
         
         return {"status": unit.ActiveState,
                 "boot": enabled_state}
-    except Exception as e:
+    except Exception:  # noqa: BLE001
         print(f"[❌] Error for {name} : {traceback.format_exc()}")
         return None

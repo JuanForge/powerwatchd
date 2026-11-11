@@ -19,7 +19,7 @@ class session:
                                                     )
         }
     
-    def _set_value(self, key: str, value: str|int|float) -> None:
+    def _set_value(self, key: str, value: str|float) -> None:
         name = key.replace(".", "_")
         m = self.metrics.get(name, None)
         try:
@@ -65,10 +65,10 @@ class session:
             + data
         )
     
-    def addclient(self, name: str, ID: str, ip: str|None = None, time: int = 1) -> None:
-        self.metrics["clients"].labels(name=name, ip=str(ip), ID=ID).set(time) # type: ignore
-    def removeclient(self, name: str, ID: str, ip: str|None = None) -> None:
-        self.metrics["clients"].remove_by_labels({"name": name, "ip": str(ip), "ID": ID})
+    def addclient(self, name: str, ip: str|None = None, time: int = 1) -> None:
+        self.metrics["clients"].labels(name=name, ip=str(ip)).set(time) # type: ignore
+    def removeclient(self, name: str, ip: str|None = None) -> None:
+        self.metrics["clients"].remove_by_labels({"name": name, "ip": str(ip)})
 
 if __name__ == "__main__":
     s = session()

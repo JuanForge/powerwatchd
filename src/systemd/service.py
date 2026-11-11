@@ -3,7 +3,8 @@ import traceback
 
 from pydbus import SystemBus
 
-def start(name, bus) -> bool:
+
+def start(name: str, bus) -> bool:
     try:
         systemd1 = bus.get(".systemd1")
         full_unit_name = f"{name}.service"
@@ -15,17 +16,15 @@ def start(name, bus) -> bool:
         
         while True:
             state = unit.ActiveState
-            if state == "active":
-                break
-            elif state == "failed":
+            if state == "active" or state == "failed":
                 break
             time.sleep(0.5)
         return True
-    except Exception as e:
+    except Exception:  # noqa: BLE001
         print(f"{name} : [ERREUR] Impossible de démarrer le service : {traceback.format_exc()}")
         return False
 
-def stop(name, bus) -> bool:
+def stop(name: str, bus) -> bool:
         try:
             systemd1 = bus.get(".systemd1")
             full_unit_name = f"{name}.service"
@@ -37,12 +36,10 @@ def stop(name, bus) -> bool:
             
             while True:
                 state = unit.ActiveState
-                if state == "inactive":
-                    break
-                elif state == "failed":
+                if state == "inactive" or state == "failed":
                     break
                 time.sleep(0.5)
             return True
-        except Exception as e:
+        except Exception:  # noqa: BLE001
             print(f"{name} : [ERREUR] Impossible d'arrêter le service : {traceback.format_exc()}")
             return False

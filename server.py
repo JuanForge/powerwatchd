@@ -1,38 +1,56 @@
 import argparse
-import json
-import secrets
 import socket
 import sys
 import threading
 import time
 import traceback
 
-from src import prometheus, protocol
-from version import __schemaVersion__, __version__
+from src import prometheus
+from src.protocol import client as nt_client
+from src.protocol import types_nt as types
+from version import __version__
 
 
 class UPS:
     class backend_ConnectionRefusedError(Exception): pass
-    def __init__(self, cacheTime: int, backend: int, ups_name: str, debug: bool = False, simulate: dict|None = None, ups_host: str = "", ups_port: int = 0):
+    def __init__(
+        self,
+        cacheTime: float,
+        backend: int,
+        ups_name: str,
+        ups_host: str = "",
+        ups_port: int|None = None,
+        debug: bool = False
+    ) -> None:
         self.lock = threading.Lock()
         self.cache = {}
-        self.timelifecache = cacheTime
+        self.timelifecache: float = cacheTime
         self.debug = debug
-        self.simulate = {
-                            "__meta__": {"start_time": time.monotonic()},
-                            "simulate": simulate
-                        }
+        # self.simulate = {
+        #                     "__meta__": {"start_time": time.monotonic()},
+        #                     "simulate": simulate
+        #                 }
         
         try:
+            kwargs: dict[str, str|int] = {
+                "ups_name": ups_name,
+                "host": ups_host
+            }
+            if not ups_port is None:
+                kwargs["port"] = ups_port
+            
             if backend == 0:
                 from src.ups import backend0
-                self.backend = backend0.session(ups_name=ups_name, host=ups_host, port=ups_port)
+                # pyrefly: ignore[bad-argument-type]
+                self.backend = backend0.session(**kwargs)
             elif backend == 1:
                 from src.ups import backend1
-                self.backend = backend1.session(ups_name=ups_name, host=ups_host, port=ups_port)
+                # pyrefly: ignore[bad-argument-type]
+                self.backend = backend1.session(**kwargs)
             elif backend == 2:
                 from src.ups import backend2
-                self.backend = backend2.session(ups_name=ups_name, host=ups_host, port=ups_port)
+                # pyrefly: ignore[bad-argument-type]
+                self.backend = backend2.session(**kwargs)
             else:
                 raise RuntimeError("Invalid backend number.")
         except ConnectionRefusedError:
@@ -42,7 +60,7 @@ class UPS:
         with self.lock:
             self.timelifecache = x
     
-    def status(self) -> dict:
+    def status(self) -> dict[str, str|int]:
         with self.lock:
             if self.cache.get("time", 0) < time.monotonic() - self.timelifecache:
                 start_time = time.monotonic()
@@ -51,11 +69,11 @@ class UPS:
                 if self.cache["data"] == None:
                     raise RuntimeError("UPS data stale ( 53 )")
                 
-                if self.simulate["simulate"]:
-                    self.cache["data"]["battery.charge"] = str(max(
-                        0,
-                        100 - (time.monotonic() - self.simulate["__meta__"]["start_time"]) * self.simulate["simulate"]["battery_drain_rate_sec"]
-                    ))
+                # if self.simulate["simulate"]:
+                #     self.cache["data"]["battery.charge"] = str(max(
+                #         0,
+                #         100 - (time.monotonic() - self.simulate["__meta__"]["start_time"]) * self.simulate["simulate"]["battery_drain_rate_sec"]
+                #     ))
                 
                 if self.debug:
                     print(f"time for status ups : {time.monotonic() - start_time}")
@@ -63,63 +81,70 @@ class UPS:
             
             return self.cache["data"]
 
-def client(metrics: prometheus.session, sock: socket.socket, addr, ups: UPS):
+def client(
+    sock: socket.socket,
+    addr: tuple[str, int]|tuple[str, int, int, int],
+    metrics: prometheus.session,
+    ups: UPS
+) -> None:
     LastStatus: str = ""
     timeoutNoPing = 10
-    name = ID = None
     start_time_connect = time.monotonic()
     
+    name = None
     try:
         sock.settimeout(0.5)
-        sesssion = protocol.network(sock)
-        start_time: dict = {
-                        "init": time.monotonic(),
-                        "ping": time.monotonic()
-                    }
+        session = nt_client.server(sock)
         
-        data = sesssion.recv()
+        # start_time_init = time.monotonic()
+        start_time_ping = time.monotonic()
+        
+        data = session._session.recv()
         if data["type"] != "handshake_name":
             raise ConnectionError("Expected handshake message")
         
-        sesssion.send({"type": "handshake_ack"})
-        
         name = str(data.get("name", "unknown"))
-        ID = secrets.token_hex(20)
+        session._session.send({"type": "handshake_ack"})
+        
+        # ID = secrets.token_hex(20)
         
         while True:
-            metrics.addclient(name=name, ID=ID, ip=addr[0], time=int(time.monotonic() - start_time_connect))
+            metrics.addclient(name=name, ip=addr[0], time=int(time.monotonic() - start_time_connect))
             try:
-                data = sesssion.recv()
+                data = session.recv()
                 
-                start_time["ping"] = time.monotonic()
+                start_time_ping = time.monotonic()
                 
-                if data["type"] == "ping":
-                    sesssion.send({"type": "pong"})
+                if isinstance(data, types.ping):
+                    session.pong()
                 
                 data = ups.status()
                 
                 if data["ups.status"] != LastStatus:
+                    # pyrefly: ignore[bad-assignment]
                     LastStatus = data["ups.status"]
                     
+                    # pyrefly: ignore[not-iterable]
                     if "OB" in data["ups.status"]:
                         status = False
                     else:
                         status = True
                     
-                    sesssion.send({"type": "UPS",
-                                    "status": status,
-                                    "battery.charge": int(data["battery.charge"])
-                                })
-            except socket.timeout:
-                if time.monotonic() - start_time["ping"] > timeoutNoPing:
+                    session.UPS(
+                        status=status,
+                        # pyrefly: ignore[bad-argument-type]
+                        battery_charge=data["battery.charge"]
+                    )
+            except TimeoutError:
+                if time.monotonic() - start_time_ping > timeoutNoPing:
                     return
                 else:
                     continue
-    except:
+    except:  # noqa: E722
         print(traceback.format_exc())
     finally:
-        if (type(name) == str) and (type(ID) == str):
-            metrics.removeclient(name=name, ID=ID, ip=addr[0])
+        if (type(name) == str):
+            metrics.removeclient(name=name, ip=addr[0])
         if sock:
             sock.close()
 
@@ -132,7 +157,7 @@ def prometheus_thread(metrics: prometheus.session, host: str, port: int, ups: UP
     print(f"Prometheus listen {host}:{port}")
     while True:
         try:
-            conn, addr = sock.accept()
+            conn = sock.accept()[0]
             
             data = b""
             while b"\r\n\r\n" not in data and len(data) < ( 1024 * 1024 * 4):
@@ -141,21 +166,16 @@ def prometheus_thread(metrics: prometheus.session, host: str, port: int, ups: UP
                     break
                 data += chunk
             else:
+                # pyrefly: ignore[bad-argument-type]
                 metrics.update(ups.status())
                 conn.sendall(metrics._dumps())
-        except Exception as e:
+        except Exception:  # noqa: BLE001
             print(traceback.format_exc())
 
 if __name__ == "__main__":
-    with open('config.server.json', 'r') as file:
-        JSON:dict = json.load(file)
-    
-    if JSON["schemaVersion"] != __schemaVersion__:
-        sys.exit(109)
-    
-    with open('simulate.profiles.json', 'r') as file:
-        profile_simulate:dict = json.load(file)
-        del profile_simulate["index"]
+    # with open('simulate.profiles.json', 'r') as file:
+    #     profile_simulate = json.load(file)
+    #     del profile_simulate["index"]
     
     parser = argparse.ArgumentParser(
         description="Configuration CLI",
@@ -181,21 +201,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ups-cache-time",
         type=int,
-        default=JSON["cacheUPStime"],
-        help=f"Cache uptime (seconds), default : {JSON['cacheUPStime']}"
+        default=1,
+        help="Cache uptime (seconds)"
     )
     
     parser.add_argument(
         "--ups-name",
-        help=f"Name of the UPS used by the backend, default : {JSON['UPSname']}"
+        help="Name of the UPS used by the backend.",
+        default="ecoEaton"
     )
     
     parser.add_argument(
         "--ups-backend",
         type=int,
-        default=JSON["backend"],
-        help=f"UPS backend ID, default : {JSON['backend']}",
-        choices=[0, 1, 2]
+        help="UPS backend ID.",
+        choices=[0, 1, 2],
+        default=2
     )
     
     parser.add_argument(
@@ -213,18 +234,18 @@ if __name__ == "__main__":
         type=int,
         default=2162
     )
-    parser.add_argument(
-        "--simulate-profile",
-        type=str,
-        default=False,
-        help="Use a predefined simulation profile to inject synthetic UPS states for testing purposes.",
-        choices=profile_simulate.keys()
-    )
+    # parser.add_argument(
+    #     "--simulate-profile",
+    #     type=str,
+    #     default=False,
+    #     help="Use a predefined simulation profile to inject synthetic UPS states for testing purposes.",
+    #     choices=profile_simulate.keys()
+    # )
     parser.add_argument(
         "--max-clients",
         type=int,
         help="Maximum number of clients connected to the server.",
-        default=-1
+        default=None
     )
     parser.add_argument(
         "--ups-backend-host",
@@ -251,38 +272,37 @@ if __name__ == "__main__":
     #     help="Battery percentage decrease per second during simulation."
     # )
     
-    args, unknown = parser.parse_known_args()
-    
-    if unknown:
-        print(f"Error: Unrecognized arguments: {', '.join(unknown)}")
-        sys.exit(139)
-    print("\033[38;5;208m[WARNING]\033[0m Use CLI arguments instead. File-based configuration will be deprecated.\033[0m")
+    args = parser.parse_args()
     
     if args.version:
         print(f"version : {__version__}")
         sys.exit(0)
-    if any([args.simulate_profile]): # args.simulate_power_outage, args.battery_drain_rate
-        print("\033[38;5;208m[WARNING]\033[0m [TEST MODE] Application started in simulation mode. This instance is NOT intended for production use.\033[0m")
+    
+    # if any([args.simulate_profile]): # args.simulate_power_outage, args.battery_drain_rate
+    #     print("\033[38;5;208m[WARNING]\033[0m [TEST MODE] Application started in simulation mode. This instance is NOT intended for production use.\033[0m")
     
     simulate_profile = None
     
-    if args.simulate_profile:
-        if not str(args.simulate_profile) in profile_simulate.keys():
-            print("The requested profile does not exist.")
-            sys.exit(234)
-        else:
-            simulate_profile: dict|None = profile_simulate[args.simulate_profile]
+    # if args.simulate_profile:
+    #     if not str(args.simulate_profile) in profile_simulate:
+    #         print("The requested profile does not exist.")
+    #         sys.exit(234)
+    #     else:
+    #         simulate_profile: dict|None = profile_simulate[args.simulate_profile]
     
     metrics = prometheus.session()
     threads: list[threading.Thread] = []
     
     try:
-        ups = UPS(cacheTime=args.ups_cache_time or JSON.get("cacheUPStime", 0),
-                    backend=args.ups_backend    or JSON.get("backend", 2),
-                    ups_name=args.ups_name      or JSON.get("UPSname", "ecoEaton"),
-                    debug=args.debug, simulate=simulate_profile,
-                    ups_host=args.ups_backend_host,
-                    ups_port=args.ups_backend_port)
+        ups = UPS(
+            cacheTime=args.ups_cache_time,
+            backend=args.ups_backend,
+            ups_name=args.ups_name,
+            debug=args.debug,
+            # simulate=simulate_profile,
+            ups_host=args.ups_backend_host,
+            ups_port=args.ups_backend_port
+        )
         
         if args.prometheus:
             threading.Thread(target=prometheus_thread, args=(metrics, args.host, args.prometheus_port, ups), daemon=True).start()
@@ -295,7 +315,7 @@ if __name__ == "__main__":
         while True:
             try:
                 conn, addr = sock.accept()
-                if int(args.max_clients) == -1 or len(threads) <= int(args.max_clients):
+                if args.max_clients is None or len(threads) <= args.max_clients:
                     thread = threading.Thread(target=client, args=(metrics, conn, addr, ups), daemon=True)
                     thread.start()
                     threads.append(thread)
@@ -306,12 +326,12 @@ if __name__ == "__main__":
                             threads.remove(unit)
                 else:
                     try: conn.close()
-                    except: pass
-            except Exception as e:
+                    except: pass  # noqa: E722, S110
+            except Exception:  # noqa: BLE001
                 print(traceback.format_exc())
     except KeyboardInterrupt:
         pass
     except UPS.backend_ConnectionRefusedError as e:
         print(f"{e}\nError connecting to the UPS backend.")
-    except Exception as e:
+    except Exception:  # noqa: BLE001
         print(traceback.format_exc())

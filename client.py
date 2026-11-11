@@ -1,104 +1,95 @@
-import os
-import sys
-import time
-import json
-import socket
-import secrets
 import argparse
+import os
+import socket
+import sys
 import threading
+import time
 import traceback
-
 from pathlib import Path
+
 from pydbus import SystemBus
 
+from src import config_client as config
 from src import systemd
-from src import protocol
-from version import __version__, __schemaVersion__
+from src.protocol import client as nt_client
+from src.protocol import types_nt as types
+from version import __schemaVersion__, __version__
 
 ifbuzzer = True
 
 if ifbuzzer:
     from src import buzzer
 
-def keepalive(session: protocol.network):
+def keepalive(session: nt_client.client):
     try:
         while True:
-            session.send({"type": "ping"})
+            session.ping()
             time.sleep(4)
-    except:
+    except:  # noqa: E722
         print(f"KEEP ALIVE : {traceback.format_exc()}")
 
-def AntiBoucle(tasks):
+def AntiBoucle(tasks: list[config.StopTask]):
     seen = set()
     
-    def visit(task_name, path):
+    def visit(task_name: str, path: list[str]):
         if task_name in path:
-            print(f"⚠️ Loop detected : {' -> '.join(path + [task_name])}")
+            print(f"Loop detected : {' -> '.join(path + [task_name])}")
             return False
         if task_name in seen:
             return True
         seen.add(task_name)
-        task = next((t for t in tasks if t["name"] == task_name), None)
+        task = next((t for t in tasks if t.name == task_name), None)
         if not task:
             return True
-        for dep in task.get("dependency", []):
+        for dep in task.dependency:
             result = visit(dep, path + [task_name])
             if result is False:
                 return False
         return True
     
     for task in tasks:
-        result = visit(task['name'], [])
+        result = visit(task.name, [])
         if result is False:
             return False
     
-    print("Aucun cycle détecté.")
     return True
 
-def audio(STOP):
-    while STOP[0] == False:
+def audio(STOP: threading.Event):
+    while not STOP.wait(2):
         buzzer.beep(2000, 500)
-        time.sleep(2)
-    else:
-        return True
 
-def shutdown(bus):
+def shutdown():
     time.sleep(2)
-    login1 = bus.get(".login1")
+    login1 = SystemBus().get(".login1")
     login1.PowerOff(False)
-    return True
 
-def unit(percent: int, task: dict, bus, tasks: list):
+def unit(percent: int, task: config.StopTask, tasks: list[config.StopTask]):
+    bus = SystemBus()
     for tache in tasks:
-        if task['name'] in tache.get('dependency', []):
-            status = systemd.status(tache['name'], bus=bus)
-            if isinstance(status, dict):
+        if task.name in tache.dependency:
+            status = systemd.status(tache.name, bus=bus)
+            if isinstance(status, dict):  # noqa: SIM102
                 if not status['status'] in ('inactive', 'failed', 'deactivating'):
-                    print(f"[WARNING] : {task['name']} ask by {tache['name']}")
+                    print(f"[WARNING] : {task.name} ask by {tache.name}")
     
-    if percent <= task.get('percent', 100):
-        print(f"[WARNING] : STOP : {task['name']}")
-        systemd.service.stop(task['name'], bus=bus)
+    if percent <= task.percent:
+        print(f"[WARNING] : STOP : {task.name}")
+        systemd.service.stop(task.name, bus=bus)
         return True
     else:
         return False
 
 class main:
-    def __init__(self, JSON, save: dict|None = None, beep: bool = True):
-        if save == None:
-            self.data = {}
-        else:
-            self.data = save
-        
+    def __init__(self, JSON: config.Config, beep: bool = True):
         self.JSON = JSON
         self.bus = SystemBus()
-        self.threadbeep = None
-        self.threadbeepSTOP = [False]
-        self.oldstatus = None
-        self.threads = None
-        self.service_table: list|list[dict] = []
+        self.threadbeep: None|threading.Thread = None
+        self.threadbeepSTOP = threading.Event()
+        self.oldstatus: bool|None = None
+        #self.threads = None
+        self.service_table: list[dict[str, str|list[str]]] = []
         self.beep = beep
-        self.tasks: list[dict] = self.JSON['OnBattery']['StopTask']
+        self.tasks = self.JSON.OnBattery.StopTask
     
     def update(self, status: bool, charge: int):
         if status == False:
@@ -109,27 +100,33 @@ class main:
             
             if self.oldstatus == True:
                 for task in self.tasks:
-                    _status = systemd.status(task['name'], bus=self.bus)
-                    if isinstance(_status, dict):
+                    _status = systemd.status(task.name, bus=self.bus)
+                    if isinstance(_status, dict):  # noqa: SIM102
                         if _status['status'] in ('active',):
-                            self.service_table.append({"name": task['name'], "status": _status['status'], "dependency": task.get('dependency', [])})
+                            self.service_table.append(
+                                {
+                                    "name": task.name,
+                                    "status": _status['status'],
+                                    "dependency": task.dependency
+                                }
+                            )
             
             for task in self.tasks:
-                unit(charge, task, bus=self.bus, tasks=self.tasks)
+                unit(charge, task, tasks=self.tasks)
             
-            if charge <= JSON["OnBattery"]["shutdown"]["percent"]:
+            if charge <= JSON.OnBattery.shutdown.percent:
                 print("SHUTDOWN")
-                shutdown(bus=self.bus)
+                shutdown()
         
         elif status == True:
             if self.oldstatus == False:
                 print("Server on mains power.")
             
             if self.beep == True and self.threadbeep != None:
-                self.threadbeepSTOP[0] = True
+                self.threadbeepSTOP.set()
                 self.threadbeep.join()
                 self.threadbeep = None
-                self.threadbeepSTOP[0] = False
+                self.threadbeepSTOP.clear()
                 
                 for task in self.service_table:
                     def __load__(tache: str) -> None:
@@ -144,11 +141,9 @@ class main:
                         
                         systemd.service.start(tache, bus=self.bus)
                     if task['status'] == 'active':
-                        __load__(task['name'])
+                        __load__(str(task['name']))
                 self.service_table = []
         self.oldstatus = status
-    
-    def save(self) -> list: return []
 
 if __name__ == "__main__":
     if True == ifbuzzer:
@@ -157,26 +152,23 @@ if __name__ == "__main__":
     os.chdir(Path(__file__).resolve().parent)
     
     with open('config.client.json', 'r') as file:
-        JSON: dict = json.load(file)
+        JSON = config.Config.model_validate_json(file.read())
     
-    if JSON.get("schemaVersion", str("")) != __schemaVersion__:
+    if JSON.schemaVersion != __schemaVersion__:
         sys.exit(158)
     
-    tasks = JSON['OnBattery']['StopTask']
-    if not AntiBoucle(tasks):
+    if not AntiBoucle(JSON.OnBattery.StopTask):
         sys.exit(157)
     
     parser = argparse.ArgumentParser(
         description="Configuration CLI",
         allow_abbrev=False
     )
-    
     parser.add_argument(
         "--host",
         type=str,
         default="127.0.0.1"
     )
-    
     parser.add_argument(
         "--port",
         type=int,
@@ -192,22 +184,13 @@ if __name__ == "__main__":
         action="store_false",
         help="disable the beep sound for debug"
     )
-    # parser.add_argument(
-    #     "--no-beep-lib",
-    #     action="store_false",
-    #     help="The buzzer library for C/Python is not imported."
-    # )
     parser.add_argument(
         "--name",
         type=str,
         help="Client name displayed on server side"
     )
     
-    args, unknown = parser.parse_known_args()
-    
-    if unknown:
-        print(f"Error: Unrecognized arguments: {', '.join(unknown)}")
-        sys.exit(187)
+    args = parser.parse_args()
     
     if args.version:
         print(f"version : {__version__}")
@@ -216,65 +199,69 @@ if __name__ == "__main__":
     if not args.no_beep_lib:
         from src import buzzer
     
-    JSON["beep"] = args.no_beep
-    if args.name: JSON["name"] = args.name
+    JSON.beep = args.no_beep
+    name = args.name
     
-    app = main(JSON, beep=JSON["beep"])
+    app = main(JSON, beep=JSON.beep)
     sock = None
     try:
         i = 0
-        while i != JSON["offlineServer"]["retry"]:
+        while i != JSON.offlineServer.retry:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(JSON["offlineServer"]["tcpTimeoutSec"])
+                sock.settimeout(JSON.offlineServer.tcpTimeoutSec)
                 print(f"Connect ( try: {i+1})...")
                 sock.connect((args.host, args.port))
                 
-                session = protocol.network(sock)
+                session = nt_client.client(sock)
                 
-                name = JSON.get("name", secrets.token_hex(8))
                 print(f"name client : {name}")
                 
-                session.send({"type": "handshake_name", "name": name})
-                if session.recv()["type"] == "handshake_ack":
+                session.handshake(name)
+                d = session.recv()
+                if isinstance(d, types.handshake_ack):
                     print("Connect : OK")
                     break
                 else:
-                    raise ConnectionError("Handshake failed")
-            except Exception as e:
+                    raise ConnectionError(f"Handshake failed: {d}")
+            except Exception as e:  # noqa: BLE001
                 print(str(e))
                 i += 1
-                buzzer.beep(3000, 500) # type: ignore
-                time.sleep(JSON["offlineServer"]["retryIntervalSec"])
+                buzzer.beep(3000, 500)
+                time.sleep(JSON.offlineServer.retryIntervalSec)
         else:
-            if JSON["offlineServer"]["shutdown"] == True:
-                shutdown(SystemBus())
+            if JSON.offlineServer.shutdown == True:
+                shutdown()
                 sys.exit(178)
             else:
                 sys.exit(180)
         
-        sock.settimeout(1)
+        session._sock.settimeout(1)
         
-        threading.Thread(target=keepalive, args=(session,), daemon=True).start()
+        keepalive_thread = threading.Thread(target=keepalive, args=(session,), daemon=True)
+        keepalive_thread.start()
         
         while True:
             try:
                 data = session.recv()
                 
-                if data["type"] == "UPS":
-                    app.update(data["status"], data["battery.charge"])
+                if isinstance(data, types.UPS):
+                    app.update(data.status, data.battery_charge)
                 
-                elif data["type"] == "pong":
+                elif isinstance(data, types.pong):
                     pass
-            except socket.timeout:
+                
+                if not keepalive_thread.is_alive():
+                    raise RuntimeError("keepalive thread is dead")
+            except TimeoutError:
                 continue
     except KeyboardInterrupt:
         pass
-    except Exception as e:
+    except Exception:  # noqa: BLE001
         print(traceback.format_exc())
     finally:
-        with open("session.client.json", "w", encoding="utf-8") as file:
-            file.write(json.dumps(app.save(), indent=4))
+        # with open("session.client.json", "w", encoding="utf-8") as file:
+        #     file.write(json.dumps(app.save(), indent=4))
         
         if sock:
             sock.close()

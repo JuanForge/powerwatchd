@@ -1,5 +1,6 @@
-import traceback
 import subprocess
+import traceback
+
 
 class session:
     def __init__(self, ups_name: str, host: str = "127.0.0.1", port: int = 2162):
@@ -11,7 +12,7 @@ class session:
         try:
             result = subprocess.run(
                 ['upsc', f'{self.name}@{self.host}:{self.port}'],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5, check=False
             )
             if result.returncode != 0:
                 print("Erreur: Impossible d'interroger l'UPS.")
